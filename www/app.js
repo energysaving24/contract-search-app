@@ -139,7 +139,16 @@ function b64ToBytes(b64) {
 
 // ───────────────────────── 통신 ─────────────────────────
 const UA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Mobile Safari/537.36";
-const nativeHttp = () => (typeof window !== "undefined" && window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorHttp) || null;
+/** 휴대폰 기능(플러그인) 호출. @capacitor/core 없이도 동작하도록 bridge의 nativePromise를 직접 사용 */
+function nativePlugin(name) {
+  if (typeof window === "undefined" || !window.Capacitor) return null;
+  const C = window.Capacitor;
+  if (C.Plugins && C.Plugins[name]) return C.Plugins[name];
+  if (typeof C.nativePromise === "function" && (!C.isNativePlatform || C.isNativePlatform()))
+    return new Proxy({}, { get: (_, method) => opts => C.nativePromise(name, method, opts) });
+  return null;
+}
+const nativeHttp = () => nativePlugin("CapacitorHttp");
 let HTTP_IMPL = null;   // 시험용으로 바꿔 끼울 수 있음
 
 async function http({ url, method = "GET", body = null, headers = {}, binary = false, timeout = 30000 }) {
@@ -834,6 +843,7 @@ if (typeof document !== "undefined") {
     try { c = readCond(); } catch (e) { toast(e.message); return; }
     COND = c; RESULTS = []; render(); stop.v = false;
     $("log").textContent = "";
+    log(nativeHttp() ? "통신: 휴대폰 직접 연결" : "통신: 브라우저 (휴대폰 앱이 아니면 조회가 안 될 수 있음)");
     $("run").hidden = true; $("stop").hidden = false; $("spin").hidden = false;
     $("logPanel").open = true; $("formPanel").open = false;
     const { rows, errs, sec, diag } = await runAll(c, log, stop);
@@ -849,7 +859,8 @@ if (typeof document !== "undefined") {
   }
 
   async function saveFile(name, b64, mime, share = true) {
-    const P = window.Capacitor && window.Capacitor.Plugins;
+    const FS = nativePlugin("Filesystem"), SH = nativePlugin("Share");
+    const P = FS ? { Filesystem: FS, Share: SH } : null;
     if (P && P.Filesystem) {
       let uri = null;
       for (const dir of ["DOCUMENTS", "CACHE"]) {
