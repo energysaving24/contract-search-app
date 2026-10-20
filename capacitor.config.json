@@ -1,0 +1,12 @@
+{
+  "appId": "kr.energysaving.contractsearch",
+  "appName": "계약조회",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false
+  },
+  "plugins": {
+    "CapacitorHttp": { "enabled": true },
+    "CapacitorCookies": { "enabled": true }
+  }
+}

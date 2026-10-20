@@ -1,0 +1,19 @@
+{
+  "name": "contract-search-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "학교장터·나라장터 계약조회 (에너지세이빙)",
+  "scripts": {
+    "prepare-web": "node -e \"require('fs').copyFileSync('node_modules/xlsx/dist/xlsx.full.min.js','www/xlsx.full.min.js')\""
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.0.0",
+    "@capacitor/core": "^7.0.0",
+    "@capacitor/filesystem": "^7.0.0",
+    "@capacitor/share": "^7.0.0",
+    "xlsx": "0.18.5"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.0.0"
+  }
+}
