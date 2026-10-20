@@ -44,12 +44,51 @@ function shortSchool(full) {
   const p = (full || "").trim().split(/\s+/);
   return p.length >= 2 && /(학교|유치원)$/.test(p[p.length - 1]) ? p[p.length - 1] : (full || "");
 }
+const REGION_KEYS = [["서울", "서울"], ["인천", "인천"], ["경기", "경기"], ["부산", "부산"], ["대구", "대구"], ["광주광역", "광주"],
+  ["대전", "대전"], ["울산", "울산"], ["세종", "세종"], ["강원", "강원"], ["충청북", "충북"], ["충북", "충북"], ["충청남", "충남"],
+  ["충남", "충남"], ["전라북", "전북"], ["전북", "전북"], ["전라남", "전남"], ["전남", "전남"], ["경상북", "경북"], ["경북", "경북"],
+  ["경상남", "경남"], ["경남", "경남"], ["제주", "제주"]];
 function regionOf(text) {
   const t = (text || "").replace(/\s+/g, "");
-  for (const k of ["서울", "인천", "경기"])
-    if (t.startsWith(k) || t.includes(`${k}특별시교육청`) || t.includes(`${k}광역시교육청`) || t.includes(`${k}도교육청`)) return k;
+  for (const [k, rg] of REGION_KEYS) if (t.startsWith(k)) return rg;
   return "";
 }
+
+/** 입력한 학교명과 이름이 정확히 같은 학교가 있으면 이름 일부만 겹치는 다른 학교는 뺀다 */
+function preferExact(rows, insts, log) {
+  const drop = new Set(), inSet = new Set(insts.map(norm));
+  const sn = r => [norm(shortSchool(r["계약(발주)기관"] || "")), norm(shortSchool((r.수요기관 || "").split(",")[0]))];
+  for (const nm of insts) {
+    const k = norm(nm);
+    if (!k) continue;
+    const hit = rows.filter(r => sn(r).some(x => x.includes(k)));
+    if (!hit.some(r => sn(r).includes(k))) continue;
+    const others = new Set();
+    for (const r of hit) {
+      const [a, b] = sn(r);
+      if (a !== k && b !== k && !inSet.has(a) && !inSet.has(b)) { drop.add(r); others.add(shortSchool(r["계약(발주)기관"] || "")); }
+    }
+    if (others.size && log) log(`  · '${nm}'과(와) 이름이 정확히 같은 학교만 남김 → 제외: ${[...others].join(", ")}`);
+  }
+  return rows.filter(r => !drop.has(r));
+}
+/** 학교장터 계약상대 사업자번호·대표자를 같은 업체의 나라장터 정보로 채움 */
+function fillCorpBiz(rows) {
+  const known = new Map();
+  for (const r of rows)
+    if (r["계약상대 사업자번호"] && r["계약상대 상호"] && !r["계약상대 상호"].includes(","))
+      if (!known.has(norm(r["계약상대 상호"]))) known.set(norm(r["계약상대 상호"]), [r["계약상대 사업자번호"], r["계약상대 대표자"] || ""]);
+  for (const r of rows)
+    if (!r["계약상대 사업자번호"]) {
+      const k = known.get(norm(r["계약상대 상호"] || ""));
+      if (k) { r["계약상대 사업자번호"] = k[0]; r["계약상대 대표자"] = r["계약상대 대표자"] || k[1]; }
+    }
+}
+/** 기관정보 저장소 (휴대폰 안에 저장) */
+const instStore = {
+  load() { try { return JSON.parse(localStorage.getItem("cs_instcache") || "{}"); } catch { return {}; } },
+  save(d) { try { localStorage.setItem("cs_instcache", JSON.stringify(d)); } catch { /* 무시 */ } },
+};
 
 /** 동시에 n개씩 실행 (순서 유지) */
 async function pool(items, n, fn) {
@@ -339,44 +378,78 @@ class G2BClient {
     if (byCode) return byCode;
     if (name) {
       const k = norm(name);
-      const hit = L.find(x => norm(pick(x, "dminsttNm")) === k) || L.find(x => norm(pick(x, "dminsttNm")).endsWith(k));
-      if (hit) return hit;
+      return L.find(x => norm(pick(x, "dminsttNm")) === k) || L.find(x => norm(pick(x, "dminsttNm")).endsWith(k)) || null;
     }
-    return code ? L[0] : null;
+    return null;
+  }
+  /** 처음 한 번: API가 결과를 주는 최대 기간과 기관코드 조건 동작 확인 */
+  async discover() {
+    if (this.span != null) return this.span;
+    const now = new Date(), notes = [];
+    let span = 0, sample = null;
+    for (const [days, label] of [[7, "7일"], [31, "1개월"], [92, "3개월"], [183, "6개월"], [366, "1년"], [1830, "5년"]]) {
+      const b = new Date(now - days * 86400000);
+      const [res, items] = await this.usr({ inqryDiv: "2", inqryBgnDt: ymd(b) + "0000", inqryEndDt: nowYmdhm() });
+      notes.push(`[점검] 조건 없이 최근 ${label} → 결과 ${res || "응답없음"}, ${items.length}건`);
+      if (res === "KEY") { this.usrOk = false; break; }
+      if (items.length) { span = days; sample = sample || items[0]; } else break;
+    }
+    this.codeOk = true;
+    if (sample && pick(sample, "dminsttCd")) {
+      const c0 = pick(sample, "dminsttCd");
+      const [, items] = await this.usr({ inqryDiv: "2", dminsttCd: c0, inqryBgnDt: ymd(new Date(now - 7 * 86400000)) + "0000", inqryEndDt: nowYmdhm() });
+      this.codeOk = items.some(x => pick(x, "dminsttCd") === c0) && items.length < 100;
+      notes.push(`[점검] 기관코드 조건 확인 (${pick(sample, "dminsttNm")} ${c0}) → ${items.length}건, ${this.codeOk ? "코드 조건 정상" : "코드 조건 이상"}`);
+    }
+    this.span = span; this.usrNotes = notes;
+    notes.forEach(n => this.log("  · 사용자정보서비스 " + n));
+    if (span) this.log(`  · 사용자정보서비스는 한 번에 최대 약 ${span}일까지 조회됨 → 이 단위로 나눠 찾습니다`);
+    return span;
   }
   async instInfo(code, full, short) {
     const key = code || full || short;
     if (!key || !this.usrOk) return null;
     if (this.cache.has(key)) return this.cache.get(key);
-    const now = nowYmdhm(), diag = !this.diagDone;
+    if (!this.disk) this.disk = instStore.load();
+    if (this.disk[key]) { this.cache.set(key, this.disk[key]); return this.disk[key]; }
+    const span = await this.discover();
+    if (this.usrSkip) {
+      if (!this.skipLogged) { this.skipLogged = true; this.log("  · 첫 기관의 사업자번호를 찾지 못해, 시간 절약을 위해 나머지 기관은 생략합니다"); }
+      return null;
+    }
+    if (!this.usrOk || !span) { this.cache.set(key, null); return null; }
+    const diag = !this.diagDone;
     this.diagDone = true;
-    const tries = [], notes = [];
-    if (code) tries.push(["1", { dminsttCd: code }, "199001010000"], ["2", { dminsttCd: code }, "200001010000"]);
-    for (const nm of [...new Set([full, short].filter(Boolean))])
-      tries.push(["1", { dminsttNm: nm }, "199001010000"], ["2", { dminsttNm: nm }, "200001010000"]);
-    const y = new Date().getFullYear();
-    if (code) for (let yy = y; yy > y - 6; yy--) tries.push(["2", { dminsttCd: code }, `${yy}01010000`, `${yy}12312359`]);
-    let found = null;
-    for (const [div, cond, bgn, end0] of tries) {
-      const end = end0 || now;
-      const [res, items] = await this.usr(Object.assign({}, cond, { inqryDiv: div, inqryBgnDt: bgn, inqryEndDt: end }));
-      notes.push(`조회구분${div} ${JSON.stringify(cond)} ${bgn.slice(0, 4)}~${end.slice(0, 4)} → 결과 ${res || "응답없음"}, ${items.length}건` +
-        (items.length ? ` (예: ${pick(items[0], "dminsttNm")} / ${pick(items[0], "bizno")})` : ""));
-      if (res === "KEY") {
-        this.usrOk = false;
-        this.log("  · 사업자번호: '사용자정보서비스' 승인이 아직 반영되지 않았습니다 (승인 후 1~2시간 소요) → 생략");
-        break;
-      }
+    const notes = diag ? [...(this.usrNotes || [])] : [];
+    const cond = code && this.codeOk ? { dminsttCd: code } : { dminsttNm: full || short };
+    // 구간: 현재 → 1985년, span 일 단위
+    const wins = [], limit = new Date(1985, 0, 1);
+    let end = new Date();
+    while (end > limit) {
+      const bgn = new Date(Math.max(end - span * 86400000, limit));
+      wins.push([bgn, end]);
+      end = new Date(bgn - 60000);
+    }
+    const y95 = new Date(1995, 0, 1), y04 = new Date(2004, 11, 31);
+    const mid = wins.filter(([a, b]) => b >= y95 && a <= y04), nw = wins.filter(([a]) => a > y04), old = wins.filter(([, b]) => b < y95);
+    const tries = wins.slice(0, 3).map(w => ["2", w]).concat(mid.concat(nw, old).map(w => ["1", w])).slice(0, 150);
+    let found = null, n = 0;
+    const hm = d => ymd(d) + pad2(d.getHours()) + pad2(d.getMinutes());
+    for (const [div, [bgn, end2]] of tries) {
+      if (this.stop.v) break;
+      const [res, items] = await this.usr(Object.assign({}, cond, { inqryDiv: div, inqryBgnDt: hm(bgn), inqryEndDt: hm(end2) }));
+      n++;
+      if (res === "KEY") { this.usrOk = false; break; }
       found = G2BClient.pickInst(items, cond.dminsttCd ? code : "", short || full);
-      if (found) break;
+      if (found) { notes.push(`찾음: 조회구분${div} ${JSON.stringify(cond)} ${isoD(bgn)}~${isoD(end2)} (${n}번째 조회)`); break; }
     }
-    if (diag) {
-      this.diagText = `기관: ${full || short} / 코드 ${code}\n` + notes.join("\n");
-      if (!found) this.log(`  · 사업자번호 조회 기록: ${notes[0] || "-"}`);
-    }
+    if (!found) { notes.push(`못 찾음: ${JSON.stringify(cond)} 로 ${n}번 조회 (1985년~현재, ${span}일 단위)`); if (diag) this.usrSkip = true; }
+    if (diag) this.diagText = `기관: ${full || short} / 코드 ${code}\n` + notes.join("\n");
+    this.log(`  · 사업자번호 [${short || full}] ${notes[notes.length - 1] || ""}`);
     const info = found ? { 사업자번호: fmtBizno(pick(found, "bizno")), 전화번호: pick(found, "telNo"), 팩스: pick(found, "faxNo"),
       주소: [pick(found, "adrs"), pick(found, "dtlAdrs")].filter(Boolean).join(" ") } : null;
     this.cache.set(key, info);
+    if (info && info.사업자번호) { this.disk[key] = info; instStore.save(this.disk); }
     return info;
   }
 }
@@ -408,11 +481,18 @@ function parseS2bList(html) {
   const pages = [...String(html).matchAll(/goList\((\d+)\)/g)].map(m => +m[1]);
   return { rows: out, last: pages.length ? Math.max(...pages) : 1 };
 }
-const pageAlert = html => { const m = String(html || "").match(/alert\(['"]([^'"]{4,120})['"]\)/); return m ? m[1] : ""; };
+/** 실제로 뜨는 오류 창 문구만. 학교장터 정상 화면에도 입력검사용 alert 문장이 함수 안에 늘 들어 있음 */
+function pageAlert(html) {
+  const h = String(html || "");
+  if (h.includes("tcmo001Form") && (h.includes("td_list_tit_01") || h.includes("goList"))) return "";
+  const body = h.replace(/function\s+\w+\s*\([^)]*\)\s*\{(?:[^{}]|\{[^{}]*\})*\}/g, "");
+  const m = body.match(/alert\(['"]([^'"]{4,120})['"]\)/);
+  return m ? m[1] : "";
+}
 
-function s2bForm(region, kw, inst, d1, d2, page, dash = false) {
+function s2bForm(region, kw, inst, d1, d2, page) {
   const [, name, full] = S2B_EDU[region];
-  const fd = d => dash ? isoD(d) : ymd(d);
+  const fd = d => ymd(d);
   const f = { forwardName: "eduEstiNTenderContList", pageNo: page, tender_num: "", tender_step_code: "",
     page_flag: "", excelSection: "N", eduName: name, eduFullName: full, eduFrame: "f", contSection: "e",
     contAmount: "0", tbWidth: "680", tender_sep1: "1", tender_name: (kw || "").slice(0, 30),
@@ -433,7 +513,7 @@ const eucDecode = bytes => new TextDecoder("euc-kr").decode(bytes);
 class S2BClient {
   constructor(log, stop) {
     this.log = log; this.stop = stop; this.sample = ""; this.dateSample = "";
-    this.dash = false; this.fixTried = false; this.fixDone = false;
+    this.failed = [];
   }
   async open(url, form) {
     let last;
@@ -462,31 +542,18 @@ class S2BClient {
     }
     throw new Error(`${region} 학교장터 화면을 열 수 없습니다`);
   }
-  /** 한 쪽 조회. '날짜' 안내가 나오면 날짜 형식을 바꿔 한 번 더 */
+  /** 한 쪽 조회. '날짜' 안내가 나오면 같은 형식(YYYYMMDD)으로 새로 접속해 최대 2번 다시 시도.
+   *  그래도 안 되면 0건으로 넘기지 않고 '조회 실패'로 처리 */
   async fetchPage(region, kw, nm, a, b, pg) {
-    const usedDash = this.dash;
-    let html = await this.open(S2B_BASE + "tcmo001.do", s2bForm(region, kw, nm, a, b, pg, this.dash));
-    const al = pageAlert(html);
-    if (!al.includes("날짜")) return html;
-    if (this.fixTried) {
-      for (let i = 0; i < 20 && this.dash === usedDash && !this.fixDone; i++) await sleep(500);
-      if (this.dash !== usedDash) html = await this.open(S2B_BASE + "tcmo001.do", s2bForm(region, kw, nm, a, b, pg, this.dash));
-      return html;
-    }
-    this.fixTried = true;
-    this.dateSample = html;
-    for (const dash of [true, false]) {
-      this.dash = dash;
+    let html = await this.open(S2B_BASE + "tcmo001.do", s2bForm(region, kw, nm, a, b, pg));
+    for (let k = 0; k < 2; k++) {
+      if (!pageAlert(html).includes("날짜")) return html;
+      if (!this.dateSample) this.dateSample = html;
+      await sleep(2000 + 3000 * k);
       await this.session(region);
-      const h2 = await this.open(S2B_BASE + "tcmo001.do", s2bForm(region, kw, nm, a, b, pg, dash));
-      if (!pageAlert(h2).includes("날짜")) {
-        this.fixDone = true;
-        this.log(`  · 학교장터 날짜 형식을 ${dash ? "YYYY-MM-DD" : "YYYYMMDD"}로 바꿔 조회합니다`);
-        return h2;
-      }
+      html = await this.open(S2B_BASE + "tcmo001.do", s2bForm(region, kw, nm, a, b, pg));
     }
-    this.dash = false; this.fixDone = true;
-    this.log("  ✗ 학교장터가 날짜를 받지 않습니다 → 설정 → '응답 기록 보내기'로 보내주세요");
+    if (pageAlert(html).includes("날짜")) throw new Error("날짜 오류 안내가 반복됨");
     return html;
   }
   async month(region, nm, a, b, kw) {
@@ -511,8 +578,12 @@ class S2BClient {
       }
       this.log(`[학교장터] ${region} ${isoD(a)}~${isoD(b).slice(5)} '${nm || "전체"}' : ${got}건`);
     } catch (e) {
-      if (!/중지/.test(e.message))
-        this.log(`  ✗ [학교장터] ${region} ${isoD(a)}~${isoD(b).slice(5)} '${nm || "전체"}' 응답 없음 → 건너뜀`);
+      if (!/중지/.test(e.message)) {
+        const why = /날짜/.test(e.message) ? "날짜 오류" : "응답 없음";
+        this.failed.push(`${region} ${pad2(a.getMonth() + 1)}월 '${nm || "전체"}' (${why})`);
+        this.log(`  ✗ [학교장터] ${region} ${isoD(a)}~${isoD(b).slice(5)} '${nm || "전체"}' 조회 실패 — ${why} (0건이 아니라 확인 못 함)`);
+      }
+      return [];
     }
     return out;
   }
@@ -520,6 +591,8 @@ class S2BClient {
   async search(jobs, d1, d2, kw) {
     const parts = await pool(jobs, 2, ([rg, nm]) =>
       pool(monthChunks(d1, d2), 3, ([a, b]) => this.month(rg, nm, a, b, kw)).then(x => [].concat(...x)));
+    if (this.failed.length)
+      this.log(`  ※ 학교장터 조회 실패 ${this.failed.length}건: ${this.failed.join(", ")} → 잠시 뒤 다시 조회하세요`);
     const out = [], seen = new Set();
     for (const r of [].concat(...parts)) {
       const key = `${r.계약번호}|${r.계약일}|${r.계약금액}`;
@@ -563,11 +636,11 @@ function s2bJobs(c, rows, log) {
         const rg = regionOf(r["계약(발주)기관"]) || regionOf(r.수요기관);
         if (rg) regs.add(rg);
       }
-    let use = c.sregions.filter(x => regs.has(x));
-    if (!use.length) use = c.sregions;
-    if (nm && use.length < c.sregions.length) log(`  · '${nm}'은(는) ${use.join("·")} 학교로 확인 → 학교장터 ${use.join("·")}만 조회`);
-    use.forEach(rg => jobs.push([rg, nm]));
+    if (regs.size && !regs.has("서울")) { log(`  · '${nm || "전체"}'은(는) ${[...regs].sort().join("·")} 학교 → 학교장터 조회 생략 (서울만 조회)`); continue; }
+    if (nm && !regs.size) log(`  · '${nm}'은(는) 나라장터 계약이 없어 지역 확인 불가 → 학교장터 서울에서 조회`);
+    jobs.push(["서울", nm]);
   }
+  if (!jobs.length) log("  · 학교장터 조회 대상(서울 학교)이 없어 건너뜁니다");
   return jobs;
 }
 /** 전체 조회 흐름 (화면 없이도 시험 가능) */
@@ -576,12 +649,13 @@ async function runAll(c, log, stop) {
   let rows = [], g = null, s = null;
   const errs = [];
   if (c.g2b) {
-    try { g = new G2BClient(c.key, log, stop); rows = rows.concat(await g.search(c.d1, c.d2, c.kinds, c.insts, c.mode, c.kw)); }
+    try { g = new G2BClient(c.key, log, stop); rows = preferExact(rows.concat(await g.search(c.d1, c.d2, c.kinds, c.insts, c.mode, c.kw)), c.insts, log); }
     catch (e) { errs.push("나라장터: " + e.message); log("✗ 나라장터 오류: " + e.message); }
   }
   if (c.s2b && !stop.v) {
     s = new S2BClient(log, stop);
-    try { rows = rows.concat(await s.search(s2bJobs(c, rows, log), c.d1, c.d2, c.kw)); }
+    const jobs = s2bJobs(c, rows, log);
+    try { if (jobs.length) rows = rows.concat(await s.search(jobs, c.d1, c.d2, c.kw)); }
     catch (e) { errs.push("학교장터: " + e.message); log("✗ 학교장터 오류: " + e.message); }
   }
   rows.forEach(r => fillInst(r, c));
@@ -614,6 +688,8 @@ async function runAll(c, log, stop) {
     }
     log(`  · 사업자번호 확인: 기관 ${keys.length}곳 중 ${[...infos.values()].filter(x => x && x.사업자번호).length}곳`);
   }
+  rows = preferExact(rows, c.insts);
+  fillCorpBiz(rows);
   fillFromSameInst(rows);
   rows.forEach(r => delete r._정식명);
   rows.sort((a, b) => (a["기관 상호"] + a.계약일 + a.계약명).localeCompare(b["기관 상호"] + b.계약일 + b.계약명, "ko"));
@@ -700,8 +776,6 @@ if (typeof document !== "undefined") {
     document.querySelectorAll("input[name=mode]").forEach(x => { x.checked = x.value === mode; });
     const kinds = store.get("kinds", ["용역"]);
     document.querySelectorAll("input[name=kind]").forEach(x => { x.checked = kinds.includes(x.value); });
-    const sr = store.get("sregions", ["서울", "경기", "인천"]);
-    document.querySelectorAll("input[name=sr]").forEach(x => { x.checked = sr.includes(x.value); });
     $("g2b").checked = store.get("g2b", true);
     $("s2b").checked = store.get("s2b", true);
     $("biz").checked = store.get("biz", true);
@@ -715,12 +789,11 @@ if (typeof document !== "undefined") {
     if (!insts.length && !kw) throw new Error("기관명(학교명)이나 계약명 중 하나는 입력하세요.");
     const mode = (document.querySelector("input[name=mode]:checked") || {}).value || "계약기관";
     const kinds = [...document.querySelectorAll("input[name=kind]:checked")].map(x => x.value);
-    const sregions = [...document.querySelectorAll("input[name=sr]:checked")].map(x => x.value);
+    const sregions = ["서울"];
     const g2b = $("g2b").checked, s2b = $("s2b").checked, key = $("key").value.trim(), biz = $("biz").checked;
     if (!g2b && !s2b) throw new Error("조회 출처를 하나 이상 선택하세요.");
     if (g2b && !key) { $("setPanel").open = true; throw new Error("설정에서 나라장터 인증키를 입력하세요."); }
     if (g2b && !kinds.length) throw new Error("나라장터 업무구분을 하나 이상 선택하세요.");
-    if (s2b && !sregions.length) throw new Error("학교장터 지역을 하나 이상 선택하세요.");
     Object.entries({ d1: $("d1").value, d2: $("d2").value, insts: $("insts").value, kw, key, mode, kinds, sregions, g2b, s2b, biz })
       .forEach(([k, v]) => store.set(k, v));
     return { d1, d2, insts, kw, mode, kinds, sregions, g2b, s2b, key, biz };
@@ -828,5 +901,5 @@ if (typeof document !== "undefined") {
 // node 시험용
 if (typeof module !== "undefined") module.exports = {
   encEuckr, formEncode, parseS2bList, s2bForm, s2bRow, g2bParse, g2bRow, g2bKeep, monthChunks, fillInst,
-  fillFromSameInst, buildWorkbook, cntrctOrder, corpFromList, dminsttFromList, regionOf, s2bJobs, runAll,
+  fillFromSameInst, preferExact, fillCorpBiz, pageAlert, buildWorkbook, cntrctOrder, corpFromList, dminsttFromList, regionOf, s2bJobs, runAll,
   G2BClient, S2BClient, setHttp: f => { HTTP_IMPL = f; } };
