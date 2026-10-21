@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1F4E78">
+<title>계약조회</title>
+<link rel="stylesheet" href="style.css">
+<script src="xlsx.full.min.js"></script>
+<script src="app.js"></script>
+</head>
+<body>
+<header class="appbar">
+  <div class="brand">계약조회 <small>학교장터·나라장터</small></div>
+  <span id="spin" class="spinner" hidden></span>
+</header>
+
+<main>
+  <details id="formPanel" class="panel" open>
+    <summary>조회 조건</summary>
+
+    <label class="lbl">계약기간 (계약일)</label>
+    <div class="row">
+      <input id="d1" type="date"><span class="tilde">~</span><input id="d2" type="date">
+    </div>
+    <div class="chips">
+      <button type="button" data-range="year">올해</button>
+      <button type="button" data-range="last">작년</button>
+      <button type="button" data-range="3m">최근 3개월</button>
+    </div>
+
+    <label class="lbl" for="insts">기관명 (학교명)</label>
+    <textarea id="insts" rows="3" placeholder="한 줄에 하나씩 (예: 감정중학교)"></textarea>
+
+    <label class="lbl">기관 구분</label>
+    <div class="seg">
+      <label><input type="radio" name="mode" value="계약기관"><span>발주기관</span></label>
+      <label><input type="radio" name="mode" value="둘 다"><span>발주+수요</span></label>
+      <label><input type="radio" name="mode" value="수요기관"><span>수요기관</span></label>
+    </div>
+
+    <label class="lbl" for="kw">계약명 <span class="muted">(선택 — 비우면 전체)</span></label>
+    <input id="kw" type="text" placeholder="예: 기계설비">
+
+    <label class="lbl">조회 출처</label>
+    <div class="src">
+      <label class="chk"><input id="g2b" type="checkbox"> 나라장터</label>
+      <div class="sub">
+        <label class="chk"><input type="checkbox" name="kind" value="용역"> 용역</label>
+        <label class="chk"><input type="checkbox" name="kind" value="물품"> 물품</label>
+        <label class="chk"><input type="checkbox" name="kind" value="공사"> 공사</label>
+      </div>
+    </div>
+    <div class="src">
+      <label class="chk"><input id="s2b" type="checkbox"> 학교장터</label>
+      <span class="muted">서울 학교만 조회 (경기·인천은 나라장터만 사용)</span>
+    </div>
+  </details>
+
+  <details id="setPanel" class="panel">
+    <summary>설정</summary>
+    <label class="lbl" for="key">나라장터 인증키 <span class="muted">(공공데이터포털 일반 인증키)</span></label>
+    <input id="key" type="password" autocomplete="off" placeholder="인증키 붙여넣기">
+    <label class="chk block"><input id="biz" type="checkbox"> 기관 사업자번호 조회 <span class="muted">(사용자정보서비스 승인 필요)</span></label>
+    <button type="button" id="sample" class="ghost">응답 기록 보내기 (문제 확인용)</button>
+    <p class="muted hint">학교는 대부분 발주기관과 수요기관이 같아 <b>발주기관</b>만 고르면 더 빠릅니다.
+    학교장터는 나라장터 결과로 서울 학교로 확인된 곳만 조회합니다. 찾은 사업자번호는 휴대폰에 저장해 다음부터 바로 씁니다.</p>
+  </details>
+
+  <div id="resultBar" class="resultbar" hidden>
+    <div id="summary"></div>
+    <input id="filter" type="search" placeholder="결과 안에서 찾기">
+  </div>
+  <section id="list"></section>
+
+  <details id="logPanel" class="panel log">
+    <summary>진행 기록 <span id="status" class="muted"></span></summary>
+    <pre id="log"></pre>
+  </details>
+</main>
+
+<footer class="bottombar">
+  <button id="run" class="primary">조회</button>
+  <button id="stop" class="danger" hidden>중지</button>
+  <button id="xls" class="secondary">엑셀 다운로드</button>
+</footer>
+<div id="toast" class="toast"></div>
+</body>
+</html>
